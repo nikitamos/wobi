@@ -1,6 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
+    collections::HashMap, fmt::Debug, fs::File, hash::Hash, io::Write, path::Path
 };
 
 pub struct MarkovChain<T: Hash> {
@@ -31,11 +30,23 @@ pub struct MarkovChainBuilder<T: Hash + Eq> {
     mapped: HashMap<T, usize>,
 }
 
-impl<T: Hash + Eq + Default + Clone> MarkovChainBuilder<T> {
+impl<T: Hash + Eq + Default + Clone+Debug> MarkovChainBuilder<T> {
     pub fn build(self) -> MarkovChain<T> {
         if let Recording(state) = self.state {
+            let mut matrix = Vec::with_capacity(state.len());
+            for i in 0..state.len() {
+                matrix.push(Vec::<f32>::new());
+                let mut sum = 0f32;
+                for j in 0..state.len() {
+                    matrix[i].push(state[i][j] as f32);
+                    sum += state[i][j] as f32;
+                }
+                for j in 0..state.len() {
+                    matrix[i][j] /= sum;
+                }
+            }
             MarkovChain {
-                matrix: Default::default(),
+                matrix,
                 current_state: 0,
                 states: self.mapped,
             }
@@ -93,6 +104,24 @@ impl<T: Hash + Eq + Default + Clone> MarkovChainBuilder<T> {
             mat[state1][state2] += 1;
         } else {
             panic!("Attempting to add a transition to unfinalized builder");
+        }
+    }
+    pub fn dump_matrix(&self, path: &Path) {
+        if let Ok(mut f) = File::create(path) {
+            if let Recording(mat) = &self.state {
+                for i in 0..mat.len() {
+                    for j in 0..mat.len() {
+                        if let Err(e) = f.write(format!("{:5} ", mat[i][j]).as_bytes()) {
+                            println!("[WARN] Error writing {}: {}", path.to_str().unwrap(), e);
+                        }
+                    }
+                    if let Err(e) = f.write("\n".as_bytes()) {
+                        println!("[WARN] Error writing {}: {}", path.to_str().unwrap(), e);
+                    }
+                }
+            } 
+        } else {
+            println!("[WARN] Unable to open file {}", path.to_str().unwrap());
         }
     }
 }

@@ -11,6 +11,8 @@ use std::{
 use config::Config;
 use regex::{Regex, RegexBuilder};
 
+use crate::markov_chain::{MarkovChain, MarkovChainBuilder};
+
 pub mod config {
     use std::{
         error::Error,
@@ -74,7 +76,7 @@ pub struct Corpora {
     cfg: config::Config,
     directory: PathBuf,
     tokenizer: Regex,
-    tokens: HashMap<String, u32>,
+    tokens: Vec<String>,
 }
 
 impl Corpora {
@@ -90,13 +92,17 @@ impl Corpora {
             cfg,
             directory: path,
             tokenizer,
-            tokens: HashMap::new(),
+            tokens: Vec::new(),
         })
     }
     /// Tokenizes the `text` and returns the map
     /// that matches token and number of its
     /// occurencies in the `text`
-    fn analyze_file(path: &Path, tokenizer: &Regex) -> Option<HashMap<String, u32>> {
+    fn analyze_file(
+        path: &Path,
+        tokenizer: &Regex,
+        ignore_case: bool,
+    ) -> Option<HashMap<String, u32>> {
         let mut text = String::new();
         let mut tokenized = HashMap::new();
         match File::open(path) {
@@ -120,6 +126,10 @@ impl Corpora {
             }
         }
 
+        if ignore_case {
+            text = text.to_lowercase();
+        }
+
         let tokens = tokenizer.find_iter(&text);
         for token in tokens {
             let s = token.as_str().to_owned();
@@ -130,7 +140,7 @@ impl Corpora {
 
     fn sort_tokenization(tokenized: HashMap<String, u32>) -> Vec<(String, u32)> {
         let mut v = tokenized.into_iter().collect::<Vec<_>>();
-        v.sort_by(|x, y| x.1.cmp(&y.1));
+        v.sort_by(|x, y| y.1.cmp(&x.1));
         v
     }
 
@@ -157,6 +167,7 @@ impl Corpora {
         let save_statistics_ = Arc::new(self.cfg.corpora.save_statistics);
         let directory_ = Arc::new(&self.directory);
         let tokenizer_ = Arc::new(&self.tokenizer);
+        let ign_case_ = Arc::new(self.cfg.tokenize.ignore_case);
 
         thread::scope(|scope| {
             let all_paths = Arc::new(Mutex::new(self.cfg.corpora.texts.clone()));
@@ -168,6 +179,7 @@ impl Corpora {
                 let paths = all_paths.clone();
                 let stat_dir = stat_dir_.clone();
                 let tokenizer = tokenizer_.clone();
+                let ign_case = ign_case_.clone();
                 pool.push(
                     thread::Builder::new()
                         .name(format!("Tokenize #{i}"))
@@ -182,9 +194,11 @@ impl Corpora {
                                     }
                                     lock.pop().unwrap()
                                 };
-                                if let Some(tok) =
-                                    Self::analyze_file(&directory.join(&path), &tokenizer)
-                                {
+                                if let Some(tok) = Self::analyze_file(
+                                    &directory.join(&path),
+                                    &tokenizer,
+                                    *ign_case,
+                                ) {
                                     if *save_statistics {
                                         let file_tokens = Self::sort_tokenization(tok);
                                         match File::create(stat_dir.join(path)) {
@@ -215,9 +229,9 @@ impl Corpora {
             for thr in pool {
                 Self::merge_tokens(&mut a, thr.join().expect("Thread finished with an error"));
             }
+
+            let tokens = Self::sort_tokenization(a);
             if self.cfg.corpora.save_statistics {
-                self.tokens = a.clone();
-                let tokens = Self::sort_tokenization(a);
                 match File::create(stat_dir_.join("overall_stat.txt")) {
                     Ok(mut f) => {
                         for t in &tokens {
@@ -226,10 +240,42 @@ impl Corpora {
                     }
                     Err(e) => println!("[WARN] Unable to save statistics: {}", e.to_string()),
                 }
-            } else {
-               self.tokens = a;
             }
+            self.tokens = tokens.into_iter().map(|(k, _)| k).collect();
         });
+    }
+
+    pub fn build_markov_chain(&self) -> Option<MarkovChain<String>> {
+        let mut builder = MarkovChainBuilder::with_states(self.tokens.clone());
+        for fpath in &self.cfg.corpora.texts {
+            let mut text = String::new();
+            match File::open(self.directory.join(&fpath)) {
+                Ok(mut f) => {
+                    if let Err(e) = f.read_to_string(&mut text) {
+                        println!("Unable to read {fpath}: {}", e.to_string());
+                        return None;
+                    }
+                },
+                Err(e) => {
+                    println!("[WARN] Unable to open {fpath}: {}", e.to_string());
+                    return None;
+                }
+            }
+            if self.cfg.tokenize.ignore_case {
+                text = text.to_lowercase();
+            }
+            let mut token = self.tokenizer.find_iter(&text);
+            let mut prev = token.next().unwrap().as_str().to_owned();
+            for this in token {
+                let s = this.as_str().to_string();
+                builder.add_transition(&prev, &s);
+                prev = s;
+            }
+        }
+        if self.cfg.corpora.save_statistics {
+            builder.dump_matrix(&self.directory.join("statistics").join("OCCURANCE_MATRIX.txt"));
+        }
+        Some(builder.build())
     }
 
     pub fn get_config(&self) -> &config::Config {
