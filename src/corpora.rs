@@ -1,8 +1,8 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     error::Error,
-    fs::File,
-    io::Read,
+    fs::{self, File},
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -44,6 +44,8 @@ pub mod config {
     pub struct Corpora {
         pub name: String,
         pub texts: Vec<String>,
+        #[serde(default = "serde_false_workaround")]
+        pub save_statistics: bool,
     }
 
     #[derive(Deserialize, Serialize)]
@@ -94,43 +96,78 @@ impl Corpora {
     /// Tokenizes the `text` and returns the map
     /// that matches token and number of its
     /// occurencies in the `text`
-    fn tokenize_file(&self, tokenized: &mut HashMap<String, u32>, path: String) -> Option<()> {
+    fn analyze_file(path: &Path, tokenizer: &Regex) -> Option<HashMap<String, u32>> {
         let mut text = String::new();
-        match File::open(&path) {
+        let mut tokenized = HashMap::new();
+        match File::open(path) {
             Ok(mut f) => {
                 if let Err(e) = f.read_to_string(&mut text) {
-                    println!("Unable to read {path}: {}", e.to_string());
+                    println!(
+                        "Unable to read {}: {}",
+                        path.to_str().unwrap(),
+                        e.to_string()
+                    );
                     return None;
                 }
             }
             Err(e) => {
-                println!("Unable to open {path}: {}", e.to_string());
+                println!(
+                    "Unable to open {}: {}",
+                    path.to_str().unwrap(),
+                    e.to_string()
+                );
                 return None;
             }
         }
 
-        let tokens = self.tokenizer.find_iter(&text);
+        let tokens = tokenizer.find_iter(&text);
         for token in tokens {
             let s = token.as_str().to_owned();
-            tokenized.entry(s).and_modify(|x| *x += 1).or_insert(0);
+            tokenized.entry(s).and_modify(|x| *x += 1).or_insert(1);
         }
-        Some(())
+        Some(tokenized)
     }
 
-    pub fn tokenize_all(&mut self, mut jobs: usize) {
-        thread::scope(|scope| {
-            let mut all_paths = Arc::new(Mutex::new(
-                self.cfg
-                    .corpora
-                    .texts
-                    .clone()
-            ));
+    fn sort_tokenization(tokenized: HashMap<String, u32>) -> Vec<(String, u32)> {
+        let mut v = tokenized.into_iter().collect::<Vec<_>>();
+        v.sort_by(|x, y| x.1.cmp(&y.1));
+        v
+    }
 
+    fn merge_tokens<T: std::iter::IntoIterator<Item = (String, u32)>>(
+        dst: &mut HashMap<String, u32>,
+        src: T,
+    ) {
+        for i in src {
+            dst.entry(i.0).and_modify(|x| *x += i.1).or_insert(i.1);
+        }
+    }
+
+    pub fn analyze_all(&mut self, mut jobs: usize) {
+        let stat_dir_ = self.directory.join("statistics");
+        if self.cfg.corpora.save_statistics {
+            if !stat_dir_.is_dir() {
+                if let Err(e) = fs::create_dir(&stat_dir_) {
+                    self.cfg.corpora.save_statistics = false;
+                    println! {"[WARN] Error creating directory for statistics: {}\nNo statistics will be saved", e.to_string()};
+                }
+            }
+        }
+        let stat_dir_ = Arc::new(stat_dir_);
+        let save_statistics_ = Arc::new(self.cfg.corpora.save_statistics);
+        let directory_ = Arc::new(&self.directory);
+        let tokenizer_ = Arc::new(&self.tokenizer);
+
+        thread::scope(|scope| {
+            let all_paths = Arc::new(Mutex::new(self.cfg.corpora.texts.clone()));
             jobs = jobs.min(self.cfg.corpora.texts.len());
             let mut pool = Vec::with_capacity(jobs);
             for i in 0..jobs {
-                let corpora = Arc::new(&self);
-                let mut paths = all_paths.clone();
+                let directory = directory_.clone();
+                let save_statistics = save_statistics_.clone();
+                let paths = all_paths.clone();
+                let stat_dir = stat_dir_.clone();
+                let tokenizer = tokenizer_.clone();
                 pool.push(
                     thread::Builder::new()
                         .name(format!("Tokenize #{i}"))
@@ -138,20 +175,59 @@ impl Corpora {
                             let mut tokens = HashMap::new();
 
                             loop {
-                                let path = {   
+                                let path = {
                                     let mut lock = paths.lock().unwrap();
-                                    if lock.len() == 0 {break;}
+                                    if lock.len() == 0 {
+                                        break;
+                                    }
                                     lock.pop().unwrap()
                                 };
-                                corpora.tokenize_file(&mut tokens, path);
+                                if let Some(tok) =
+                                    Self::analyze_file(&directory.join(&path), &tokenizer)
+                                {
+                                    if *save_statistics {
+                                        let file_tokens = Self::sort_tokenization(tok);
+                                        match File::create(stat_dir.join(path)) {
+                                            Ok(mut f) => {
+                                                for t in &file_tokens {
+                                                    let _ = f.write(
+                                                        format!("{} {}\n", t.1, t.0).as_bytes(),
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => println!(
+                                                "[WARN] Unable to save statistics: {}",
+                                                e.to_string()
+                                            ),
+                                        }
+                                        Self::merge_tokens(&mut tokens, file_tokens);
+                                    } else {
+                                        Self::merge_tokens(&mut tokens, tok);
+                                    }
+                                }
                             }
                             tokens
                         })
                         .expect("Unable to spawn a thread"),
                 );
             }
+            let mut a = HashMap::new();
             for thr in pool {
-                let r = thr.join().expect("Thread finished with an error");
+                Self::merge_tokens(&mut a, thr.join().expect("Thread finished with an error"));
+            }
+            if self.cfg.corpora.save_statistics {
+                self.tokens = a.clone();
+                let tokens = Self::sort_tokenization(a);
+                match File::create(stat_dir_.join("overall_stat.txt")) {
+                    Ok(mut f) => {
+                        for t in &tokens {
+                            let _ = f.write(format!("{} {}\n", t.1, t.0).as_bytes());
+                        }
+                    }
+                    Err(e) => println!("[WARN] Unable to save statistics: {}", e.to_string()),
+                }
+            } else {
+               self.tokens = a;
             }
         });
     }
