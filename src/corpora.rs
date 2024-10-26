@@ -255,7 +255,7 @@ impl Corpora {
                         println!("Unable to read {fpath}: {}", e.to_string());
                         return None;
                     }
-                },
+                }
                 Err(e) => {
                     println!("[WARN] Unable to open {fpath}: {}", e.to_string());
                     return None;
@@ -273,7 +273,12 @@ impl Corpora {
             }
         }
         if self.cfg.corpora.save_statistics {
-            builder.dump_matrix(&self.directory.join("statistics").join("OCCURANCE_MATRIX.txt"));
+            builder.dump_matrix(
+                &self
+                    .directory
+                    .join("statistics")
+                    .join("OCCURANCE_MATRIX.txt"),
+            );
         }
         Some(builder.build())
     }

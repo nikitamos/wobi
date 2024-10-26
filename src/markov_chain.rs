@@ -1,20 +1,36 @@
 use std::{
-    collections::HashMap, fmt::Debug, fs::File, hash::Hash, io::Write, path::Path
+    collections::HashMap, fmt::Debug, fs::File, hash::Hash, io::Write,
+    path::Path,
 };
 
 pub struct MarkovChain<T: Hash> {
     matrix: Vec<Vec<f32>>,
-    states: HashMap<T, usize>,
+    state_ids: HashMap<T, usize>,
+    states: Vec<T>,
     current_state: usize,
 }
 
-impl<T: Hash> MarkovChain<T> {
-    pub fn state_count() -> usize {
-        todo!()
+impl<T: Hash + Eq + Clone> MarkovChain<T> {
+    pub fn reset(&mut self, state: &T) -> Result<(), ()> {
+        if self.state_ids.contains_key(&state) {
+            self.current_state = self.state_ids[&state];
+            Ok(())
+        } else {
+            Err(())
+        }
     }
-    pub fn reset(state: T) {}
-    pub fn next_state<Random>() -> Option<T> {
-        todo!()
+    pub fn next_state(&mut self) -> Option<T> {
+        let next: f32 = rand::random();
+        let mut sum = 0f32;
+        for i in 0..self.matrix.len() {
+            sum += self.matrix[self.current_state][i];
+            if sum >= next {
+                self.current_state = i;
+                return Some(self.states[i].clone());
+            }
+        }
+        self.current_state = 0;
+        None
     }
 }
 
@@ -28,9 +44,10 @@ use BuilderState::*;
 pub struct MarkovChainBuilder<T: Hash + Eq> {
     state: BuilderState,
     mapped: HashMap<T, usize>,
+    vectored: Vec<T>,
 }
 
-impl<T: Hash + Eq + Default + Clone+Debug> MarkovChainBuilder<T> {
+impl<T: Hash + Eq + Default + Clone + Debug> MarkovChainBuilder<T> {
     pub fn build(self) -> MarkovChain<T> {
         if let Recording(state) = self.state {
             let mut matrix = Vec::with_capacity(state.len());
@@ -48,7 +65,8 @@ impl<T: Hash + Eq + Default + Clone+Debug> MarkovChainBuilder<T> {
             MarkovChain {
                 matrix,
                 current_state: 0,
-                states: self.mapped,
+                state_ids: self.mapped,
+                states: self.vectored,
             }
         } else {
             panic!("Attempt to build map while stating not finalized");
@@ -58,18 +76,26 @@ impl<T: Hash + Eq + Default + Clone+Debug> MarkovChainBuilder<T> {
         MarkovChainBuilder::<T> {
             state: Stating,
             mapped: Default::default(),
+            vectored: Default::default(),
         }
     }
     pub fn with_states(state: Vec<T>) -> Self {
         let mut r = MarkovChainBuilder::<T> {
             state: Stating,
-            mapped: state.into_iter().enumerate().map(|(x, y)| (y, x)).collect(),
+            mapped: state
+                .clone()
+                .into_iter()
+                .enumerate()
+                .map(|(x, y)| (y, x))
+                .collect(),
+            vectored: state,
         };
         r.finalize_stating();
         r
     }
     pub fn add_state(&mut self, state: T) {
         if let Stating = self.state {
+            self.vectored.push(state.clone());
             self.mapped.insert(state, self.mapped.len());
         }
     }
@@ -119,7 +145,7 @@ impl<T: Hash + Eq + Default + Clone+Debug> MarkovChainBuilder<T> {
                         println!("[WARN] Error writing {}: {}", path.to_str().unwrap(), e);
                     }
                 }
-            } 
+            }
         } else {
             println!("[WARN] Unable to open file {}", path.to_str().unwrap());
         }
