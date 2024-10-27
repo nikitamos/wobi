@@ -1,6 +1,12 @@
 use std::{
-    collections::HashMap, fmt::Debug, fs::File, hash::Hash, io::Write,
+    collections::{HashMap, VecDeque},
+    fmt::Display,
+    fs::File,
+    hash::Hash,
+    io::Write,
     path::Path,
+    sync::Arc,
+    thread,
 };
 
 pub struct MarkovChain<T: Hash> {
@@ -47,21 +53,53 @@ pub struct MarkovChainBuilder<T: Hash + Eq> {
     vectored: Vec<T>,
 }
 
-impl<T: Hash + Eq + Default + Clone + Debug> MarkovChainBuilder<T> {
-    pub fn build(self) -> MarkovChain<T> {
-        if let Recording(state) = self.state {
-            let mut matrix = Vec::with_capacity(state.len());
-            for i in 0..state.len() {
-                matrix.push(Vec::<f32>::new());
-                let mut sum = 0f32;
-                for j in 0..state.len() {
-                    matrix[i].push(state[i][j] as f32);
-                    sum += state[i][j] as f32;
-                }
-                for j in 0..state.len() {
-                    matrix[i][j] /= sum;
-                }
+impl<T: Hash + Eq + Default + Clone + Display> MarkovChainBuilder<T> {
+    /// Computes the lines [beg..end) of the chain matrix
+    /// from the corresponding lines of occurance matrix
+    fn build_worker(state: &Vec<Vec<u32>>, beg: usize, end: usize) -> Vec<Vec<f32>> {
+        let mut matrix = Vec::new();
+        for i in beg..end {
+            matrix.push(Vec::<f32>::new());
+            let mut sum = 0f32;
+            for j in 0..state.len() {
+                matrix[i - beg].push(state[i][j] as f32);
+                sum += state[i][j] as f32;
             }
+            for j in 0..state.len() {
+                matrix[i - beg][j] /= sum;
+            }
+        }
+        matrix
+    }
+    pub fn build(self, mut jobs: usize) -> MarkovChain<T> {
+        if let Recording(state) = self.state {
+            let state_ = Arc::new(state);
+            jobs = jobs.min(state_.len());
+            let mut pool = VecDeque::with_capacity(jobs);
+            let rem = state_.len() % jobs;
+            let mut used = 0;
+            let div = state_.len() / jobs;
+
+            for i in 0..jobs {
+                let beg = used + i * div;
+                let mut end = beg + div;
+                if used < rem {
+                    used += 1;
+                    end += 1;
+                }
+                let state = state_.clone();
+
+                pool.push_back(thread::spawn(move || {
+                    Self::build_worker(&state, beg, end).into_iter()
+                }));
+            }
+            let mut a: Box<dyn Iterator<Item = Vec<f32>>> =
+                Box::new(pool.pop_front().unwrap().join().unwrap());
+            for _ in 1..jobs {
+                a = Box::new(a.chain(pool.pop_front().unwrap().join().unwrap()));
+            }
+            let matrix: Vec<Vec<f32>> = a.collect();
+
             MarkovChain {
                 matrix,
                 current_state: 0,

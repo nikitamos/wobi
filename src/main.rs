@@ -1,25 +1,39 @@
 #![allow(dead_code)]
 
-use std::io::{self, Write};
 use corpora::Corpora;
-use std::{
-    error::Error,
-    path::Path,
-};
+use std::io::{self, Write};
+use std::str::FromStr;
+use std::{error::Error, path::PathBuf, time::Instant};
 
 mod corpora;
 mod markov_chain;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    const TOKENIZE_CONFIG: &str = "/home/m0sni/t10/assets/tokenize.toml";
+    let corpora_path: PathBuf =
+        PathBuf::from_str(env!("CARGO_MANIFEST_DIR"))?.join("assets/tokenize.toml");
     let mut max_length: usize = 6;
 
-    let mut corp = Corpora::open(Path::new(TOKENIZE_CONFIG))?;
-    corp.analyze_all(2);
-    let mut chain = corp.build_markov_chain().unwrap();
-    let mut buf = String::new();
-    println!("Chain created!");
+    let mut corp = Corpora::open(&corpora_path)?;
 
+    let analyze = Instant::now();
+    corp.analyze_all();
+    let build = Instant::now();
+    let mut chain = corp.build_markov_chain().unwrap();
+    let finish = Instant::now();
+    print!(
+        "Chain created in {:.2}s (analyze {:.2}s + build {:.2}s), {} job",
+        (finish - analyze).as_secs_f32(),
+        (build - analyze).as_secs_f32(),
+        (finish - build).as_secs_f32(),
+        corp.get_config().tokenize.jobs
+    );
+    if corp.get_config().tokenize.jobs > 1 {
+        println!("s");
+    } else {
+        println!();
+    }
+
+    let mut buf = String::new();
     'outer: loop {
         loop {
             buf.clear();
@@ -34,7 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 if let Some(x) = buf.split(' ').skip(1).peekable().peek() {
                     match x.to_owned().parse() {
                         Ok(y) => max_length = y,
-                        Err(_) => println!("`=set` requires a positive interger argument")
+                        Err(_) => println!("`=set` requires a positive interger argument"),
                     }
                 } else {
                     println!("`=set` requires a positive integer argument")

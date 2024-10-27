@@ -26,6 +26,9 @@ pub mod config {
     fn serde_false_workaround() -> bool {
         false
     }
+    fn serde_1_workaround() -> usize {
+        1
+    }
 
     #[derive(Deserialize, Serialize)]
     pub struct Tokenize {
@@ -33,12 +36,15 @@ pub mod config {
         pub token: String,
         #[serde(default = "serde_false_workaround")]
         pub ignore_case: bool,
+        #[serde(default = "serde_1_workaround")]
+        pub jobs: usize,
     }
     impl Default for Tokenize {
         fn default() -> Self {
             Self {
                 token: String::new(),
                 ignore_case: false,
+                jobs: 1,
             }
         }
     }
@@ -144,16 +150,16 @@ impl Corpora {
         v
     }
 
-    fn merge_tokens<T: std::iter::IntoIterator<Item = (String, u32)>>(
-        dst: &mut HashMap<String, u32>,
-        src: T,
-    ) {
+    fn merge_tokens<T>(dst: &mut HashMap<String, u32>, src: T)
+    where
+        T: std::iter::IntoIterator<Item = (String, u32)>,
+    {
         for i in src {
             dst.entry(i.0).and_modify(|x| *x += i.1).or_insert(i.1);
         }
     }
 
-    pub fn analyze_all(&mut self, mut jobs: usize) {
+    pub fn analyze_all(&mut self) {
         let stat_dir_ = self.directory.join("statistics");
         if self.cfg.corpora.save_statistics {
             if !stat_dir_.is_dir() {
@@ -171,59 +177,51 @@ impl Corpora {
 
         thread::scope(|scope| {
             let all_paths = Arc::new(Mutex::new(self.cfg.corpora.texts.clone()));
-            jobs = jobs.min(self.cfg.corpora.texts.len());
+            let jobs = self.cfg.tokenize.jobs.min(self.cfg.corpora.texts.len());
             let mut pool = Vec::with_capacity(jobs);
-            for i in 0..jobs {
+            for _ in 0..jobs {
                 let directory = directory_.clone();
                 let save_statistics = save_statistics_.clone();
                 let paths = all_paths.clone();
                 let stat_dir = stat_dir_.clone();
                 let tokenizer = tokenizer_.clone();
                 let ign_case = ign_case_.clone();
-                pool.push(
-                    thread::Builder::new()
-                        .name(format!("Tokenize #{i}"))
-                        .spawn_scoped(scope, move || -> HashMap<String, u32> {
-                            let mut tokens = HashMap::new();
+                pool.push(scope.spawn(move || -> HashMap<String, u32> {
+                    let mut tokens = HashMap::new();
 
-                            loop {
-                                let path = {
-                                    let mut lock = paths.lock().unwrap();
-                                    if lock.len() == 0 {
-                                        break;
-                                    }
-                                    lock.pop().unwrap()
-                                };
-                                if let Some(tok) = Self::analyze_file(
-                                    &directory.join(&path),
-                                    &tokenizer,
-                                    *ign_case,
-                                ) {
-                                    if *save_statistics {
-                                        let file_tokens = Self::sort_tokenization(tok);
-                                        match File::create(stat_dir.join(path)) {
-                                            Ok(mut f) => {
-                                                for t in &file_tokens {
-                                                    let _ = f.write(
-                                                        format!("{} {}\n", t.1, t.0).as_bytes(),
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => println!(
-                                                "[WARN] Unable to save statistics: {}",
-                                                e.to_string()
-                                            ),
-                                        }
-                                        Self::merge_tokens(&mut tokens, file_tokens);
-                                    } else {
-                                        Self::merge_tokens(&mut tokens, tok);
-                                    }
-                                }
+                    loop {
+                        let path = {
+                            let mut lock = paths.lock().unwrap();
+                            if lock.len() == 0 {
+                                break;
                             }
-                            tokens
-                        })
-                        .expect("Unable to spawn a thread"),
-                );
+                            lock.pop().unwrap()
+                        };
+                        if let Some(tok) =
+                            Self::analyze_file(&directory.join(&path), &tokenizer, *ign_case)
+                        {
+                            if *save_statistics {
+                                let file_tokens = Self::sort_tokenization(tok);
+                                match File::create(stat_dir.join(path)) {
+                                    Ok(mut f) => {
+                                        for t in &file_tokens {
+                                            let _ =
+                                                f.write(format!("{} {}\n", t.1, t.0).as_bytes());
+                                        }
+                                    }
+                                    Err(e) => println!(
+                                        "[WARN] Unable to save statistics: {}",
+                                        e.to_string()
+                                    ),
+                                }
+                                Self::merge_tokens(&mut tokens, file_tokens);
+                            } else {
+                                Self::merge_tokens(&mut tokens, tok);
+                            }
+                        }
+                    }
+                    tokens
+                }));
             }
             let mut a = HashMap::new();
             for thr in pool {
@@ -232,7 +230,7 @@ impl Corpora {
 
             let tokens = Self::sort_tokenization(a);
             if self.cfg.corpora.save_statistics {
-                match File::create(stat_dir_.join("overall_stat.txt")) {
+                match File::create(stat_dir_.join("OVERALL_STAT.txt")) {
                     Ok(mut f) => {
                         for t in &tokens {
                             let _ = f.write(format!("{} {}\n", t.1, t.0).as_bytes());
@@ -280,7 +278,7 @@ impl Corpora {
                     .join("OCCURANCE_MATRIX.txt"),
             );
         }
-        Some(builder.build())
+        Some(builder.build(self.cfg.tokenize.jobs))
     }
 
     pub fn get_config(&self) -> &config::Config {
