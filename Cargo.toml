@@ -1,5 +1,6 @@
 [package]
-name = "t10"
+name = "wobi"
+authors = ["Nikita Moskaliov <nikwit10@gmail.com>"]
 version = "0.1.0"
 edition = "2021"
 
